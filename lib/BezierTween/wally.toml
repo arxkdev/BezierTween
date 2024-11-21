@@ -1,0 +1,8 @@
+[package]
+name = "arxkdev/beziertween"
+description = "Modified version of Bhristt's Bezier Curve Module"
+version = "0.0.1"
+license = "MIT"
+authors = ["Arxk (https://github.com/arxkdev)"]
+registry = "https://github.com/UpliftGames/wally-index"
+realm = "shared"
