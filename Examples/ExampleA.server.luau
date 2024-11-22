@@ -7,7 +7,7 @@ local NewBezier = Bezier.new(
 	workspace["ExampleA"].P4
 );
 
-local NumPoints = 20;
+local NumPoints = 50;
 local Points = {};
 local Lines = {};
 

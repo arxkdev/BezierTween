@@ -18,9 +18,14 @@ local GlowPartTweenInfo = TweenInfo.new(7, Enum.EasingStyle.Sine, Enum.EasingDir
 local Tween2 = NewBezier:CreateCFrameTween(GlowPart, {"CFrame"}, GlowPartTweenInfo);
 
 Tween2:Play();
-Tween2.Completed:Once(function()
-	Stop = true;
-	NewBezier:Destroy();
+task.spawn(function()
+	task.wait(2);
+	Tween2:Pause();
+	task.wait(1);
+	Tween2:Play();
+	Tween2.Completed:Once(function()
+		Stop = true;
+	end);
 end);
 
 for _ = 1, NumPoints do

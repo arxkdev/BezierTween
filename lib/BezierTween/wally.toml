@@ -6,3 +6,6 @@ license = "MIT"
 authors = ["Arxk (https://github.com/arxkdev)"]
 registry = "https://github.com/UpliftGames/wally-index"
 realm = "shared"
+
+[dependencies]
+Trove = "sleitnick/trove@1.3.0"

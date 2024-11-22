@@ -1,6 +1,8 @@
 --!nocheck
 local TweenService = game:GetService("TweenService");
 
+local Trove = require(script.Packages.Trove);
+
 export type BezierPoint = {
 	Type: string;
 	Point: Vector3 | BasePart;
@@ -19,18 +21,16 @@ export type BezierTween = typeof(setmetatable({} :: BezierTweenArguments, {} :: 
 	@field LengthIterations number
 	@field LengthIndeces {[number]: {number}}
 	@field Length number
-	@field _pointConnections {[Instance]: {["UpdateLengthChanged"]: RBXScriptConnection?, ["AncestryChanged"]: RBXScriptConnection?}}
-	@field _connections {[string]: RBXScriptConnection?}
-	@field _instances {[Instance]: Instance?}
+	@field _pointConnections {[Vector3 | BasePart]: Trove.Trove}
+	@field _trove Trove.Trove
 ]=]
 export type BezierTweenArguments = {
 	Points: {BezierPoint},
 	LengthIterations: number,
 	LengthIndeces: {[number]: {number}},
 	Length: number,
-	_pointConnections: {[Instance]: {["UpdateLengthChanged"]: RBXScriptConnection?, ["AncestryChanged"]: RBXScriptConnection?}},
-	_connections: {[string]: RBXScriptConnection?},
-	_instances: {[Instance]: Instance?},
+	_pointConnections: {[Vector3 | BasePart]: Trove.Trove},
+	_trove: Trove.Trove,
 }
 
 --[=[
@@ -46,8 +46,8 @@ export type BezierTweenArguments = {
 	@field CalculatePositionRelativeToLength (self: BezierTween, t: number) -> Vector3
 	@field CalculateDerivativeAt (self: BezierTween, t: number) -> Vector3?
 	@field CalculateDerivativeRelativeToLength (self: BezierTween, t: number) -> Vector3
-	@field CreateVector3Tween (self: BezierTween, object: Instance | {[any]: any}, propertyTable: {any}, bezierTweenInfo: TweenInfo, RelativeToLength: boolean?) -> Tween
-	@field CreateCFrameTween (self: BezierTween, object: Instance | {[any]: any}, propertyTable: {any}, bezierTweenInfo: TweenInfo, RelativeToLength: boolean?) -> Tween
+	@field CreateVector3Tween (self: BezierTween, object: Instance | {[any]: any}, propertyTable: {any}, bezierTweenInfo: TweenInfo, relativeToLength: boolean?) -> Tween
+	@field CreateCFrameTween (self: BezierTween, object: Instance | {[any]: any}, propertyTable: {any}, bezierTweenInfo: TweenInfo, relativeToLength: boolean?) -> Tween
 	@field Destroy (self: BezierTween) -> ()
 	@field new ({Vector3 | BasePart}) -> BezierTween
 ]=]
@@ -76,7 +76,7 @@ local BezierTween: Object = {} :: Object;
 BezierTween.__index = BezierTween;
 
 -- Bernstein Polynomial (used in position and derivative functions)
-function B(n: number, i: number, t: number): number
+function BernsteinPolynomial(n: number, i: number, t: number): number
 	local function Factorial(num: number): number
 		if (num == 0) then
 			return 1;
@@ -85,7 +85,22 @@ function B(n: number, i: number, t: number): number
 		end;
 	end;
 
-	return (Factorial(n) / (Factorial(i) * Factorial(n - i))) * t^(i) * (1 - t)^(n - i);
+	return (Factorial(n) / (Factorial(i) * Factorial(n - i))) * t ^ (i) * (1 - t) ^ (n - i);
+end
+
+-- This function is used to check if the given object has the properties given by the property table
+local function IsValidProperty(object: {any}, className: string, propertyTable: {any}): boolean
+	local Success, FoundProperties = pcall(function()
+		for _, Name in propertyTable do
+			if (typeof(object[Name]) ~= className and typeof(object[Name]) ~= "nil") then
+				return false;
+			end;
+		end;
+
+		return true;
+	end);
+
+	return Success, FoundProperties;
 end
 
 --[=[
@@ -100,9 +115,9 @@ function BezierTween.new(...: {Vector3 | BasePart})
 	self.LengthIterations = 1000;
 	self.LengthIndeces = {};
 	self.Length = 0;
+
 	self._pointConnections = {};
-	self._connections = {};
-	self._instances = {};
+	self._trove = Trove.new();
 
 	for _, Point in pairs({...}) do
 		if (typeof(Point) == "Vector3" or (typeof(Point) == "Instance" and Point:IsA("BasePart"))) then
@@ -133,21 +148,18 @@ function BezierTween:AddBezierPoint(point, index)
 		-- Watch for removal or changes
 		if (NewPoint.Type == "BasePartPoint") then
 			if (not self._pointConnections[point]) then
-				self._pointConnections[point] = {
-					["UpdateLengthChanged"] = nil,
-					["AncestryChanged"] = nil
-				};
+				self._pointConnections[point] = Trove.new();
 			end;
 
 			local PointConnections = self._pointConnections[point];
 
-			PointConnections["UpdateLengthChanged"] = (point:: BasePart).Changed:Connect(function(prop)
+			PointConnections:Add((point:: BasePart).Changed:Connect(function(prop)
 				if (prop == "Position") then
 					self:UpdateLength();
 				end;
-			end);
+			end));
 
-			PointConnections["AncestryChanged"] = (point:: BasePart).AncestryChanged:Connect(function(_, parent)
+			PointConnections:Add((point:: BasePart).AncestryChanged:Connect(function(_, parent)
 				if (parent == nil) then
 					local pointIndex = table.find(self.Points, NewPoint);
 
@@ -155,10 +167,10 @@ function BezierTween:AddBezierPoint(point, index)
 						table.remove(self.Points, pointIndex);
 					end;
 
-					PointConnections["AncestryChanged"]:Disconnect();
-					PointConnections["UpdateLengthChanged"]:Disconnect();
+					-- Disconnect all connections if the point is removed
+					PointConnections:Clean();
 				end;
-			end);
+			end));
 		end;
 
 		if (index and type(index) == "number") then
@@ -244,12 +256,7 @@ function BezierTween:RemoveBezierPoint(index)
 		local Point = table.remove(self.Points, index);
 
 		if (typeof(Point.Point) == "Instance" and Point.Point:IsA("BasePart")) then
-			for _, Connection in self._pointConnections[Point.Point] do
-				if (Connection.Connected) then
-					Connection:Disconnect();
-				end;
-			end;
-
+			self._pointConnections[Point.Point]:Clean();
 			self._pointConnections[Point.Point] = nil;
 		end;
 
@@ -305,7 +312,7 @@ function BezierTween:CalculatePositionAt(t)
 
 			for Index = 1, NumberOfAllPoints do
 				local p_i = AllPoints[Index];
-				local B_nit = B(NumberOfAllPoints - 1, Index - 1, t);
+				local B_nit = BernsteinPolynomial(NumberOfAllPoints - 1, Index - 1, t);
 				c_t += B_nit * p_i;
 			end;
 		end;
@@ -392,7 +399,7 @@ function BezierTween:CalculateDerivativeAt(t)
 			for Index = 1, NumberOfAllPoints - 1 do
 				local p_i1, p_i = AllPoints[Index + 1], AllPoints[Index];
 				local Q_i = (NumberOfAllPoints - 1) * (p_i1 - p_i);
-				local B_mit = B(NumberOfAllPoints - 2, Index - 1, t);
+				local B_mit = BernsteinPolynomial(NumberOfAllPoints - 2, Index - 1, t);
 				cPrime_t += B_mit * Q_i;
 			end;
 		end;
@@ -454,12 +461,12 @@ end
 	@param object Instance | table
 	@param propertyTable {any}
 	@param bezierTweenInfo TweenInfo
-	@param RelativeToLength boolean?
+	@param relativeToLength boolean?
 
 	Tweens a given object in the path made by the Bezier (position only)
 	works for any object that has the properties given by the property table
 ]=]
-function BezierTween:CreateVector3Tween(object, propertyTable, bezierTweenInfo, RelativeToLength)
+function BezierTween:CreateVector3Tween(object, propertyTable, bezierTweenInfo, relativeToLength)
 	if (#self.Points == 0) then
 		error("Bezier:CreateVector3Tween() only works if there is at least 1 BezierPoint in the Bezier!");
 	end;
@@ -472,18 +479,7 @@ function BezierTween:CreateVector3Tween(object, propertyTable, bezierTweenInfo, 
 		error("Bezier:CreateVector3Tween() requires a TweenInfo object as the third argument!");
 	end;
 
-	local Success, FoundProperties = pcall(function()
-		local Found = true;
-
-		for _, Name in propertyTable do
-			if (typeof(object[Name]) ~= "Vector3" and typeof(object[Name]) ~= "nil") then
-				Found = false;
-				break;
-			end;
-		end;
-
-		return Found;
-	end);
+	local Success, FoundProperties = IsValidProperty(object, "Vector3", propertyTable);
 
 	if (Success and FoundProperties) then
 		local NumberValue = Instance.new("NumberValue");
@@ -494,20 +490,22 @@ function BezierTween:CreateVector3Tween(object, propertyTable, bezierTweenInfo, 
 				local PlaybackState = Tween.PlaybackState;
 
 				if (PlaybackState == Enum.PlaybackState.Playing) then
-					self._connections["Vector3Tween"] = NumberValue.Changed:Connect(function(t)
+					self._trove:Add(NumberValue.Changed:Connect(function(t)
 						for _, PropertyName in propertyTable do
-							object[PropertyName] = RelativeToLength and self:CalculatePositionRelativeToLength(t) or self:CalculatePositionAt(t);
+							object[PropertyName] = relativeToLength and self:CalculatePositionRelativeToLength(t) or self:CalculatePositionAt(t);
 						end;
-					end);
+					end));
 				else
-					if (self._connections["Vector3Tween"]) then
-						self._connections["Vector3Tween"]:Disconnect();
-					end;
+					self._trove:Remove(NumberValue);
 				end;
 			end;
 		end);
 
-		table.insert(self._instances, NumberValue);
+		Tween.Completed:Once(function()
+			self:Destroy();
+		end);
+
+		self._trove:Add(NumberValue);
 		return Tween;
 	else
 		error("Bezier:CreateVector3Tween() requires a matching property table with Vector3 or nil property names for the object as the second argument!");
@@ -518,12 +516,12 @@ end
 	@param object Instance | table
 	@param propertyTable {any}
 	@param bezierTweenInfo TweenInfo
-	@param RelativeToLength boolean?
+	@param relativeToLength boolean?
 
 	Tweens a given object in the path made by the Bezier (cframe version)
 	works for any object that has the properties given by the property table
 ]=]
-function BezierTween:CreateCFrameTween(object, propertyTable, bezierTweenInfo, RelativeToLength)
+function BezierTween:CreateCFrameTween(object, propertyTable, bezierTweenInfo, relativeToLength)
 	if (#self.Points <= 1) then
 		error("Bezier:CreateVector3Tween() only works if there are at least 2 BezierPoints in the Bezier!");
 	end;
@@ -536,18 +534,7 @@ function BezierTween:CreateCFrameTween(object, propertyTable, bezierTweenInfo, R
 		error("Bezier:CreateCFrameTween() requires a TweenInfo object as the third argument!");
 	end;
 
-	local Success, FoundProperties = pcall(function()
-		local Found = true;
-
-		for _, Name in propertyTable do
-			if (typeof(object[Name]) ~= "CFrame" and typeof(object[Name]) ~= "nil") then
-				Found = false;
-				break;
-			end;
-		end;
-
-		return Found;
-	end);
+	local Success, FoundProperties = IsValidProperty(object, "CFrame", propertyTable);
 
 	if (Success and FoundProperties) then
 		local NumberValue = Instance.new("NumberValue");
@@ -558,22 +545,24 @@ function BezierTween:CreateCFrameTween(object, propertyTable, bezierTweenInfo, R
 				local PlaybackState = Tween.PlaybackState;
 
 				if (PlaybackState == Enum.PlaybackState.Playing) then
-					self._connections["CFrameTween"] = NumberValue.Changed:Connect(function(t)
+					self._trove:Add(NumberValue.Changed:Connect(function(t)
 						for _, PropertyName in propertyTable do
-							local Position = RelativeToLength and self:CalculatePositionRelativeToLength(t) or self:CalculatePositionAt(t);
-							local Derivative = RelativeToLength and self:CalculateDerivativeRelativeToLength(t) or self:CalculateDerivativeAt(t);
+							local Position = relativeToLength and self:CalculatePositionRelativeToLength(t) or self:CalculatePositionAt(t);
+							local Derivative = relativeToLength and self:CalculateDerivativeRelativeToLength(t) or self:CalculateDerivativeAt(t);
 							object[PropertyName] = CFrame.new(Position, Position + Derivative);
 						end;
-					end);
+					end));
 				else
-					if (self._connections["CFrameTween"]) then
-						self._connections["CFrameTween"]:Disconnect();
-					end;
+					self._trove:Remove(NumberValue);
 				end;
 			end;
 		end);
 
-		table.insert(self._instances, NumberValue);
+		Tween.Completed:Once(function()
+			self:Destroy();
+		end);
+
+		self._trove:Add(NumberValue);
 		return Tween;
 	else
 		error("Bezier:CreateCFrameTween() requires a matching property table with CFrame or nil property names for the object as the second argument!");
@@ -585,32 +574,15 @@ end
 ]=]
 function BezierTween:Destroy()
 	-- Disconnect all connections
-	for Point, Connections in self._pointConnections do
-		if (Connections["AncestryChanged"]) then
-			Connections["AncestryChanged"]:Disconnect();
-		end;
-
-		if (Connections["UpdateLengthChanged"]) then
-			Connections["UpdateLengthChanged"]:Disconnect();
-		end;
-
+	for Point, PointTrove in self._pointConnections do
+		PointTrove:Clean();
 		self._pointConnections[Point] = nil;
 	end;
 
-	-- Disconnect all tween listener connections
-	for _, Connection in self._connections do
-		if (Connection) then
-			Connection:Disconnect();
-		end;
-	end;
+	-- Clean the trove
+	self._trove:Clean();
 
-	-- Destroy all instances
-	for _, Object in self._instances do
-		if (Object) then
-			Object:Destroy();
-		end;
-	end;
-
+	-- Destroy the metatable
 	setmetatable(self, nil);
 end
 
