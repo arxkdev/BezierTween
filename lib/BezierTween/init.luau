@@ -1,8 +1,10 @@
 --!nocheck
 local TweenService = game:GetService("TweenService");
 
+-- Imports
 local Trove = require(script.Packages.Trove);
 
+-- Types
 export type BezierPoint = {
 	Type: string;
 	Point: Vector3 | BasePart;
@@ -75,17 +77,45 @@ type Object = {
 local BezierTween: Object = {} :: Object;
 BezierTween.__index = BezierTween;
 
--- Bernstein Polynomial (used in position and derivative functions)
-function BernsteinPolynomial(n: number, i: number, t: number): number
-	local function Factorial(num: number): number
-		if (num == 0) then
-			return 1;
-		else
-			return num * Factorial(num - 1);
+-- De Casteljau's algorithm implementation
+local function deCasteljau(points: {BezierPoint}, t: number): Vector3
+	local Q = {};
+
+	for i = 1, #points do
+		Q[i] = points[i];
+	end;
+
+	for k = 1, #points - 1 do
+		for j = 1, #points - k do
+			Q[j] = (1 - t) * Q[j] + t * Q[j + 1];
 		end;
 	end;
 
-	return (Factorial(n) / (Factorial(i) * Factorial(n - i))) * t ^ (i) * (1 - t) ^ (n - i);
+	return Q[1];
+end
+
+-- De Casteljau's algorithm derivative implementation
+local function deCasteljauDerivative(points: {BezierPoint}, t: number): Vector3
+	local n = #points - 1;
+
+	-- If the curve is linear, its derivative is constant
+	if (n == 1) then
+		return points[2] - points[1];
+	end;
+
+	local Q = {};
+	for i = 1, #points do
+		Q[i] = points[i];
+	end;
+
+	-- Calculate the derivative with one less iteration than the curve
+	for k = 1, n - 1 do
+		for j = 1, n - k + 1 do
+			Q[j] = (1 - t) * Q[j] + t * Q[j + 1];
+		end;
+	end;
+
+	return n * (Q[2] - Q[1]);
 end
 
 -- This function is used to check if the given object has the properties given by the property table
@@ -305,19 +335,7 @@ function BezierTween:CalculatePositionAt(t)
 
 	if (NumberOfPoints > 0) then
 		local AllPoints = self:GetAllPoints();
-		local NumberOfAllPoints = #AllPoints;
-
-		local c_t do
-			c_t = Vector3.new();
-
-			for Index = 1, NumberOfAllPoints do
-				local p_i = AllPoints[Index];
-				local B_nit = BernsteinPolynomial(NumberOfAllPoints - 1, Index - 1, t);
-				c_t += B_nit * p_i;
-			end;
-		end;
-
-		return c_t;
+		return deCasteljau(AllPoints, t);
 	else
 		error("Bezier:CalculatePositionAt() only works if there is at least 1 BezierPoint!");
 	end;
@@ -391,20 +409,7 @@ function BezierTween:CalculateDerivativeAt(t)
 
 	if (NumberOfPoints > 1) then
 		local AllPoints = self:GetAllPoints();
-		local NumberOfAllPoints = #AllPoints;
-
-		local cPrime_t do
-			cPrime_t = Vector3.new();
-
-			for Index = 1, NumberOfAllPoints - 1 do
-				local p_i1, p_i = AllPoints[Index + 1], AllPoints[Index];
-				local Q_i = (NumberOfAllPoints - 1) * (p_i1 - p_i);
-				local B_mit = BernsteinPolynomial(NumberOfAllPoints - 2, Index - 1, t);
-				cPrime_t += B_mit * Q_i;
-			end;
-		end;
-
-		return cPrime_t;
+		return deCasteljauDerivative(AllPoints, t);
 	else
 		error("Bezier:CalculateDerivativeAt() only works if there are at least 2 BezierPoints!");
 	end;
