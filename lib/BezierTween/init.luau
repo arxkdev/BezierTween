@@ -43,13 +43,13 @@ export type BezierTweenArguments = {
 	@field GetAllPoints (self: BezierTween) -> {Vector3}
 	@field GetPoint (self: BezierTween, i: number) -> Vector3?
 	@field RemoveBezierPoint (self: BezierTween, index: number) -> ()
-	@field UpdateLength (self: BezierTween) -> ()
+	@field _updateBezierLength (self: BezierTween) -> ()
 	@field CalculatePositionAt (self: BezierTween, t: number) -> Vector3
 	@field CalculatePositionRelativeToLength (self: BezierTween, t: number) -> Vector3
 	@field CalculateDerivativeAt (self: BezierTween, t: number) -> Vector3?
 	@field CalculateDerivativeRelativeToLength (self: BezierTween, t: number) -> Vector3
-	@field CreateVector3Tween (self: BezierTween, object: Instance | {[any]: any}, propertyTable: {any}, bezierTweenInfo: TweenInfo, relativeToLength: boolean?) -> Tween
-	@field CreateCFrameTween (self: BezierTween, object: Instance | {[any]: any}, propertyTable: {any}, bezierTweenInfo: TweenInfo, relativeToLength: boolean?) -> Tween
+	@field _applyTween (self: BezierTween, object: {any}, propertyTable: {any}, t: number, relativeToLength: boolean?) -> ()
+	@field CreateTween (self: BezierTween, object: Instance | {[any]: any}, propertyTable: {any}, tweenInfo: TweenInfo, relativeToLength: boolean?) -> Tween
 	@field Destroy (self: BezierTween) -> ()
 	@field new ({Vector3 | BasePart}) -> BezierTween
 ]=]
@@ -60,13 +60,13 @@ type Object = {
 	GetAllPoints: (self: BezierTween) -> {Vector3},
 	GetPoint: (self: BezierTween, i: number) -> Vector3?,
 	RemoveBezierPoint: (self: BezierTween, index: number) -> (),
-	UpdateLength: (self: BezierTween) -> (),
+	_updateBezierLength: (self: BezierTween) -> (),
 	CalculatePositionAt: (self: BezierTween, t: number) -> Vector3,
 	CalculatePositionRelativeToLength: (self: BezierTween, t: number) -> Vector3,
 	CalculateDerivativeAt: (self: BezierTween, t: number) -> Vector3?,
 	CalculateDerivativeRelativeToLength: (self: BezierTween, t: number) -> Vector3,
-	CreateVector3Tween: (self: BezierTween, object: Instance | {[any]: any}, propertyTable: {any}, bezierTweenInfo: TweenInfo, RelativeToLength: boolean?) -> Tween,
-	CreateCFrameTween: (self: BezierTween, object: Instance | {[any]: any}, propertyTable: {any}, bezierTweenInfo: TweenInfo, RelativeToLength: boolean?) -> Tween,
+	_applyTween: (self: BezierTween, object: {any}, propertyTable: {any}, t: number, relativeToLength: boolean?) -> (),
+	CreateTween: (self: BezierTween, object: Instance | {[any]: any}, propertyTable: {any}, tweenInfo: TweenInfo, RelativeToLength: boolean?) -> Tween,
 	Destroy: (self: BezierTween) -> (),
 	new: ({Vector3 | BasePart}) -> BezierTween,
 }
@@ -76,6 +76,20 @@ type Object = {
 ]=]
 local BezierTween: Object = {} :: Object;
 BezierTween.__index = BezierTween;
+
+-- Constants
+local DEFAULT_TWEEN_TIME = 10;
+local DEFAULT_TWEEN_EASING_STYLE = Enum.EasingStyle.Sine;
+local DEFAULT_TWEEN_EASING_DIRECTION = Enum.EasingDirection.Out;
+local DEFAULT_TWEEN_REPEAT_COUNT = 0;
+local DEFAULT_TWEEN_REVERSES = false;
+local DEFAULT_TWEEN_DELAY = 0;
+local VALID_TWEEN_PROPERTIES = {
+	"number",
+	"Vector2",
+	"Vector3",
+	"CFrame"
+};
 
 -- De Casteljau's algorithm implementation
 local function deCasteljau(points: {BezierPoint}, t: number): Vector3
@@ -118,19 +132,24 @@ local function deCasteljauDerivative(points: {BezierPoint}, t: number): Vector3
 	return n * (Q[2] - Q[1]);
 end
 
--- This function is used to check if the given object has the properties given by the property table
-local function IsValidProperty(object: {any}, className: string, propertyTable: {any}): boolean
-	local Success, FoundProperties = pcall(function()
-		for _, Name in propertyTable do
-			if (typeof(object[Name]) ~= className and typeof(object[Name]) ~= "nil") then
-				return false;
-			end;
-		end;
-
-		return true;
+-- Check if a property name is valid in the said object
+local function ValidPropertyName(object: {any}, propertyName: string): boolean
+	local Success, Value = pcall(function()
+		return object[propertyName];
 	end);
 
-	return Success, FoundProperties;
+	if (Success and table.find(VALID_TWEEN_PROPERTIES, typeof(Value))) then
+		return true;
+	end;
+
+	return false;
+end
+
+-- Our own very basic implementation of assert because Roblox refuses to fix theirs
+local function SmartAssert(condition: boolean, message: string)
+	if (not condition) then
+		error(message, 2);
+	end;
 end
 
 --[=[
@@ -150,11 +169,8 @@ function BezierTween.new(...: {Vector3 | BasePart})
 	self._trove = Trove.new();
 
 	for _, Point in pairs({...}) do
-		if (typeof(Point) == "Vector3" or (typeof(Point) == "Instance" and Point:IsA("BasePart"))) then
-			self:AddBezierPoint(Point);
-		else
-			error("The Bezier.new() constructor only takes in Vector3s and BaseParts as inputs!");
-		end;
+		SmartAssert(typeof(Point) == "Vector3" or (typeof(Point) == "Instance" and Point:IsA("BasePart")), "The Bezier.new(...) constructor only takes in Vector3s and BaseParts as inputs!");
+		self:AddBezierPoint(Point);
 	end;
 
 	return self;
@@ -169,52 +185,51 @@ end
 	a Vector3 BezierPoint is static, while a BasePart BezierPoint changes if the BasePart's position changes
 ]=]
 function BezierTween:AddBezierPoint(point, index)
-	if (point and (typeof(point) == "Instance" and point:IsA("BasePart")) or typeof(point) == "Vector3") then
-		local NewPoint: BezierPoint = {
-			Type = typeof(point) == "Vector3" and "StaicPoint" or "BasePartPoint";
-			Point = point;
-		};
+	SmartAssert(point and (typeof(point) == "Instance" and point:IsA("BasePart")) or typeof(point) == "Vector3", `Bezier:AddBezierPoint() only accepts a Vector3 or BasePart as the first argument!`);
+	SmartAssert(not index or type(index) == "number", `Bezier:AddBezierPoint() only accepts an integer as the second argument!`);
 
-		-- Watch for removal or changes
-		if (NewPoint.Type == "BasePartPoint") then
-			if (not self._pointConnections[point]) then
-				self._pointConnections[point] = Trove.new();
+	local NewPoint: BezierPoint = {
+		Type = typeof(point) == "Vector3" and "StaicPoint" or "BasePartPoint";
+		Point = point;
+	};
+
+	-- Watch for removal or changes
+	if (NewPoint.Type == "BasePartPoint") then
+		if (not self._pointConnections[point]) then
+			self._pointConnections[point] = Trove.new();
+		end;
+
+		local PointConnections = self._pointConnections[point];
+
+		PointConnections:Add((point:: BasePart).Changed:Connect(function(prop)
+			if (prop == "Position") then
+				self:_updateBezierLength();
 			end;
+		end));
 
-			local PointConnections = self._pointConnections[point];
+		PointConnections:Add((point:: BasePart).AncestryChanged:Connect(function(_, parent)
+			if (parent == nil) then
+				local pointIndex = table.find(self.Points, NewPoint);
 
-			PointConnections:Add((point:: BasePart).Changed:Connect(function(prop)
-				if (prop == "Position") then
-					self:UpdateLength();
+				if (pointIndex) then
+					table.remove(self.Points, pointIndex);
 				end;
-			end));
 
-			PointConnections:Add((point:: BasePart).AncestryChanged:Connect(function(_, parent)
-				if (parent == nil) then
-					local pointIndex = table.find(self.Points, NewPoint);
-
-					if (pointIndex) then
-						table.remove(self.Points, pointIndex);
-					end;
-
-					-- Disconnect all connections if the point is removed
-					PointConnections:Clean();
-				end;
-			end));
-		end;
-
-		if (index and type(index) == "number") then
-			table.insert(self.Points, index, NewPoint);
-		elseif (not index) then
-			table.insert(self.Points, NewPoint);
-		elseif (type(index) ~= "number") then
-			error("Bezier:AddBezierPoint() only accepts an integer as the second argument!");
-		end;
-
-		self:UpdateLength();
-	else
-		error("Bezier:AddBezierPoint() only accepts a Vector3 or BasePart as the first argument!");
+				-- Disconnect all connections if the point is removed
+				PointConnections:Clean();
+			end;
+		end));
 	end;
+
+	if (index and type(index) == "number") then
+		table.insert(self.Points, index, NewPoint);
+	elseif (not index) then
+		table.insert(self.Points, NewPoint);
+	elseif (type(index) ~= "number") then
+		error("Bezier:AddBezierPoint() only accepts an integer as the second argument!");
+	end;
+
+	self:_updateBezierLength();
 end
 
 --[=[
@@ -225,22 +240,17 @@ end
 	only works if the BezierPoint exists in the Bezier
 ]=]
 function BezierTween:ChangeBezierPoint(index, point)
-	if (type(index) ~= "number") then
-		error("Bezier:ChangeBezierPoint() only accepts a number index as the first argument!");
-	end;
+	SmartAssert(type(index) == "number", `Bezier:ChangeBezierPoint() only accepts a number index as the first argument!`);
+	SmartAssert(point and (typeof(point) == "Instance" and point:IsA("BasePart")) or typeof(point) == "Vector3", `Bezier:ChangeBezierPoint() only accepts a Vector3 or BasePart as the second argument!`);
 
-	if (point and (typeof(point) == "Instance" and point:IsA("BasePart")) or typeof(point) == "Vector3") then
-		local BezierPoint = self.Points[index];
+	local BezierPoint = self.Points[index];
 
-		if (BezierPoint) then
-			BezierPoint.Type = typeof(point) == "Vector3" and "StaicPoint" or "BasePartPoint";
-			BezierPoint.Point = point;
-			self:UpdateLength();
-		else
-			error("Did not find BezierPoint at index " .. tostring(index));
-		end;
+	if (BezierPoint) then
+		BezierPoint.Type = typeof(point) == "Vector3" and "StaicPoint" or "BasePartPoint";
+		BezierPoint.Point = point;
+		self:_updateBezierLength();
 	else
-		error("Bezier:ChangeBezierPoint() only accepts a Vector3 or BasePart as the second argument!");
+		error(`Did not find BezierPoint at index {tostring(index)}!`);
 	end;
 end
 
@@ -255,7 +265,12 @@ function BezierTween:GetAllPoints()
 	local NewPoints = {};
 
 	for Index = 1, NumberOfPoints do
-		table.insert(NewPoints, self:GetPoint(Index));
+		local Point = self:GetPoint(Index);
+		if (not Point) then
+			warn(`Did not find a BezierPoint at index {tostring(Index)}!`);
+			continue;
+		end;
+		table.insert(NewPoints, Point);
 	end;
 
 	return NewPoints;
@@ -267,13 +282,11 @@ end
 	Gets the BezierPoint of the Bezier at the index
 ]=]
 function BezierTween:GetPoint(i)
+	SmartAssert(type(i) == "number", `Bezier:GetPoint() only accepts a number index as the first argument!`);
 	local Points = self.Points;
 
-	if (Points[i]) then
-		return typeof(Points[i].Point) == "Vector3" and Points[i].Point or Points[i].Point.Position;
-	else
-		error("Did not find a BezierPoint at index " .. tostring(i) .. "!");
-	end;
+	SmartAssert(Points[i], `Did not find a BezierPoint at index {tostring(i)}!`);
+	return typeof(Points[i].Point) == "Vector3" and Points[i].Point or Points[i].Point.Position;
 end
 
 --[=[
@@ -282,16 +295,17 @@ end
 	Removes a BezierPoint from the Bezier
 ]=]
 function BezierTween:RemoveBezierPoint(index)
-	if (self.Points[index]) then
-		local Point = table.remove(self.Points, index);
+	SmartAssert(type(index) == "number", `Bezier:RemoveBezierPoint() only accepts a number index as the first argument!`);
+	SmartAssert(self.Points[index], `Did not find a BezierPoint at index {tostring(index)}!`);
 
-		if (typeof(Point.Point) == "Instance" and Point.Point:IsA("BasePart")) then
-			self._pointConnections[Point.Point]:Clean();
-			self._pointConnections[Point.Point] = nil;
-		end;
+	local Point = table.remove(self.Points, index);
 
-		self:UpdateLength();
+	if (typeof(Point.Point) == "Instance" and Point.Point:IsA("BasePart")) then
+		self._pointConnections[Point.Point]:Clean();
+		self._pointConnections[Point.Point] = nil;
 	end;
+
+	self:_updateBezierLength();
 end
 
 --[=[
@@ -299,7 +313,7 @@ end
 
 	Updates length of the Bezier
 ]=]
-function BezierTween:UpdateLength()
+function BezierTween:_updateBezierLength()
 	local Points = self:GetAllPoints();
 	local Iterations = self.LengthIterations;
 
@@ -308,15 +322,15 @@ function BezierTween:UpdateLength()
 	end;
 
 	local Length = 0;
-	local SUMS = {};
+	local Sums = {};
 
 	for Index = 1, Iterations do
 		local Derivative = self:CalculateDerivativeAt((Index - 1) / (Iterations - 1));
 		Length += Derivative.Magnitude * (1 / Iterations);
-		table.insert(SUMS, {((Index - 1) / (Iterations - 1)), Length, Derivative});
+		table.insert(Sums, {((Index - 1) / (Iterations - 1)), Length, Derivative});
 	end;
 
-	self.Length, self.LengthIndeces = Length, SUMS;
+	self.Length, self.LengthIndeces = Length, Sums;
 end
 
 --[=[
@@ -326,19 +340,15 @@ end
 	does not work if the bezier does not have any points attached to it
 ]=]
 function BezierTween:CalculatePositionAt(t)
-	if (type(t) ~= "number") then
-		error("Bezier:CalculatePositionAt() only accepts a number, got " .. tostring(t) .. "!");
-	end;
+	SmartAssert(type(t) == "number", `Bezier:CalculatePositionAt() only accepts a number, got {tostring(t)}!`);
 
 	local Points = self.Points;
 	local NumberOfPoints = #Points;
 
-	if (NumberOfPoints > 0) then
-		local AllPoints = self:GetAllPoints();
-		return deCasteljau(AllPoints, t);
-	else
-		error("Bezier:CalculatePositionAt() only works if there is at least 1 BezierPoint!");
-	end;
+	SmartAssert(NumberOfPoints > 0, "Bezier:CalculatePositionAt() only works if there is at least 1 BezierPoint!");
+
+	local AllPoints = self:GetAllPoints();
+	return deCasteljau(AllPoints, t);
 end
 
 --[=[
@@ -348,91 +358,18 @@ end
 	does not work if the bezier does not have any points attached to it
 ]=]
 function BezierTween:CalculatePositionRelativeToLength(t)
-	if (type(t) ~= "number") then
-		error("Bezier:CalculatePositionRelativeToLength() only accepts a number, got " .. tostring(t) .. "!");
-	end;
+	SmartAssert(type(t) == "number", `Bezier:CalculatePositionRelativeToLength() only accepts a number, got {tostring(t)}!`);
 
 	local Points = self.Points;
 	local NumberOfPoints = #Points;
 
-	if (NumberOfPoints > 0) then
-		local Length = self.Length;
-		local LengthIndeces = self.LengthIndeces;
-		local AllPoints = self:GetAllPoints();
+	SmartAssert(NumberOfPoints > 0, "Bezier:CalculatePositionRelativeToLength() only works if there is at least 1 BezierPoint!");
 
-		if (#AllPoints > 1) then
-			local TargetLength = Length * t;
-			local NearestParameterIndex, NearestParameter;
+	local Length = self.Length;
+	local LengthIndeces = self.LengthIndeces;
+	local AllPoints = self:GetAllPoints();
 
-			for Index, OrderedPair in ipairs(LengthIndeces) do
-				if (TargetLength - OrderedPair[2] <= 0) then
-					NearestParameterIndex = Index;
-					NearestParameter = OrderedPair;
-					break;
-				elseif (Index == #LengthIndeces) then
-					NearestParameterIndex = Index;
-					NearestParameter = OrderedPair;
-					break;
-				end;
-			end;
-
-			local p0, p1;
-			if (LengthIndeces[NearestParameterIndex - 1]) then
-				p0, p1 = self:CalculatePositionAt(LengthIndeces[NearestParameterIndex - 1][1]), self:CalculatePositionAt(NearestParameter[1]);
-			else
-				p0, p1 = self:CalculatePositionAt(NearestParameter[1]), self:CalculatePositionAt(LengthIndeces[NearestParameterIndex + 1][1]);
-			end;
-
-			local PercentError = (NearestParameter[2] - TargetLength) / (p1 - p0).Magnitude;
-			return p0 + (p1 - p0) * (1 - PercentError);
-		else
-			return self:CalculatePositionAt(0);
-		end;
-	else
-		error("Bezier:CalculatePositionRelativeToLength() only works if there is at least 1 BezierPoint!");
-	end;
-end
-
---[=[
-	@param t number
-
-	Returns the tangent vector in the direction of the path made by the bezier at t
-	in order to get a derivative of a Bezier, you need at least 2 points in the Bezier
-]=]
-function BezierTween:CalculateDerivativeAt(t)
-	if (type(t) ~= "number") then
-		error("Bezier:CalculateDerivativeAt() only accepts a number, got " .. tostring(t) .. "!");
-	end;
-
-	local Points = self.Points;
-	local NumberOfPoints = #Points;
-
-	if (NumberOfPoints > 1) then
-		local AllPoints = self:GetAllPoints();
-		return deCasteljauDerivative(AllPoints, t);
-	else
-		error("Bezier:CalculateDerivativeAt() only works if there are at least 2 BezierPoints!");
-	end;
-end
-
---[=[
-	@param t number
-
-	Returns the tangent vector in the direction of the path made by the bezier at t (where t is relative to the length of the Bezier Curve)
-	does not work if the bezier does not have at least 2 points
-	the given t value must be between 0 and 1
-]=]
-function BezierTween:CalculateDerivativeRelativeToLength(t)
-	if (type(t) ~= "number") then
-		error("Bezier:CalculateDerivativeRelativeToLength() only accepts a number, got " .. tostring(t) .. "!");
-	end;
-
-	local Points = self.Points;
-	local NumberOfPoints = #Points;
-
-	if (NumberOfPoints > 1) then
-		local Length = self.Length;
-		local LengthIndeces = self.LengthIndeces;
+	if (#AllPoints > 1) then
 		local TargetLength = Length * t;
 		local NearestParameterIndex, NearestParameter;
 
@@ -448,72 +385,102 @@ function BezierTween:CalculateDerivativeRelativeToLength(t)
 			end;
 		end;
 
-		local d0, d1;
+		local p0, p1;
 		if (LengthIndeces[NearestParameterIndex - 1]) then
-			d0, d1 = self:CalculateDerivativeAt(LengthIndeces[NearestParameterIndex - 1][1]), self:CalculateDerivativeAt(NearestParameter[1]);
+			p0, p1 = self:CalculatePositionAt(LengthIndeces[NearestParameterIndex - 1][1]), self:CalculatePositionAt(NearestParameter[1]);
 		else
-			d0, d1 = self:CalculateDerivativeAt(NearestParameter[1]), self:CalculateDerivativeAt(LengthIndeces[NearestParameterIndex + 1][1]);
+			p0, p1 = self:CalculatePositionAt(NearestParameter[1]), self:CalculatePositionAt(LengthIndeces[NearestParameterIndex + 1][1]);
 		end;
 
-		local PercentError = (NearestParameter[2] - TargetLength) / (d1 - d0).Magnitude;
-		return d0 + (d1 - d0) * (1 - PercentError);
+		local PercentError = (NearestParameter[2] - TargetLength) / (p1 - p0).Magnitude;
+		return p0 + (p1 - p0) * (1 - PercentError);
 	else
-		error("Bezier:CalculateDerivativeRelativeToLength() only works if there are at least 2 BezierPoints!");
+		return self:CalculatePositionAt(0);
 	end;
 end
 
 --[=[
-	@param object Instance | table
+	@param t number
+
+	Returns the tangent vector in the direction of the path made by the bezier at t
+	in order to get a derivative of a Bezier, you need at least 2 points in the Bezier
+]=]
+function BezierTween:CalculateDerivativeAt(t)
+	SmartAssert(type(t) == "number", `Bezier:CalculateDerivativeAt() only accepts a number, got {tostring(t)}!`);
+
+	local Points = self.Points;
+	local NumberOfPoints = #Points;
+
+	SmartAssert(NumberOfPoints > 1, "Bezier:CalculateDerivativeAt() only works if there are at least 2 BezierPoints!");
+
+	local AllPoints = self:GetAllPoints();
+	return deCasteljauDerivative(AllPoints, t);
+end
+
+--[=[
+	@param t number
+
+	Returns the tangent vector in the direction of the path made by the bezier at t (where t is relative to the length of the Bezier Curve)
+	does not work if the bezier does not have at least 2 points
+	the given t value must be between 0 and 1
+]=]
+function BezierTween:CalculateDerivativeRelativeToLength(t)
+	SmartAssert(type(t) == "number", `Bezier:CalculateDerivativeRelativeToLength() only accepts a number, got {tostring(t)}!`);
+
+	local Points = self.Points;
+	local NumberOfPoints = #Points;
+
+	SmartAssert(NumberOfPoints > 1, "Bezier:CalculateDerivativeRelativeToLength() only works if there are at least 2 BezierPoints!");
+
+	local Length = self.Length;
+	local LengthIndeces = self.LengthIndeces;
+	local TargetLength = Length * t;
+	local NearestParameterIndex, NearestParameter;
+
+	for Index, OrderedPair in ipairs(LengthIndeces) do
+		if (TargetLength - OrderedPair[2] <= 0) then
+			NearestParameterIndex = Index;
+			NearestParameter = OrderedPair;
+			break;
+		elseif (Index == #LengthIndeces) then
+			NearestParameterIndex = Index;
+			NearestParameter = OrderedPair;
+			break;
+		end;
+	end;
+
+	local d0, d1;
+	if (LengthIndeces[NearestParameterIndex - 1]) then
+		d0, d1 = self:CalculateDerivativeAt(LengthIndeces[NearestParameterIndex - 1][1]), self:CalculateDerivativeAt(NearestParameter[1]);
+	else
+		d0, d1 = self:CalculateDerivativeAt(NearestParameter[1]), self:CalculateDerivativeAt(LengthIndeces[NearestParameterIndex + 1][1]);
+	end;
+
+	local PercentError = (NearestParameter[2] - TargetLength) / (d1 - d0).Magnitude;
+	return d0 + (d1 - d0) * (1 - PercentError);
+end
+
+--[=[
+	@param object {any}
 	@param propertyTable {any}
-	@param bezierTweenInfo TweenInfo
+	@param t number
 	@param relativeToLength boolean?
 
-	Tweens a given object in the path made by the Bezier (position only)
-	works for any object that has the properties given by the property table
+	Applies the tween to the given object
 ]=]
-function BezierTween:CreateVector3Tween(object, propertyTable, bezierTweenInfo, relativeToLength)
-	if (#self.Points == 0) then
-		error("Bezier:CreateVector3Tween() only works if there is at least 1 BezierPoint in the Bezier!");
-	end;
+function BezierTween:_applyTween(object: {any}, propertyTable: {any}, t: number, relativeToLength: boolean?)
+	for _, PropertName in propertyTable do
+		local PropertyType = typeof(object[PropertName]);
+		local Position = relativeToLength and self:CalculatePositionRelativeToLength(t) or self:CalculatePositionAt(t);
 
-	if (typeof(object) ~= "Instance" and typeof(object) ~= "table") then
-		error("Bezier:CreateVector3Tween() requires an Instance or a table as the first argument!");
-	end;
-
-	if (not (typeof(bezierTweenInfo) == "TweenInfo")) then
-		error("Bezier:CreateVector3Tween() requires a TweenInfo object as the third argument!");
-	end;
-
-	local Success, FoundProperties = IsValidProperty(object, "Vector3", propertyTable);
-
-	if (Success and FoundProperties) then
-		local NumberValue = Instance.new("NumberValue");
-		local Tween = TweenService:Create(NumberValue, bezierTweenInfo, {Value = 1});
-
-		Tween.Changed:Connect(function(prop)
-			if (prop == "PlaybackState") then
-				local PlaybackState = Tween.PlaybackState;
-
-				if (PlaybackState == Enum.PlaybackState.Playing) then
-					self._trove:Add(NumberValue.Changed:Connect(function(t)
-						for _, PropertyName in propertyTable do
-							object[PropertyName] = relativeToLength and self:CalculatePositionRelativeToLength(t) or self:CalculatePositionAt(t);
-						end;
-					end));
-				else
-					self._trove:Remove(NumberValue);
-				end;
-			end;
-		end);
-
-		Tween.Completed:Once(function()
-			self:Destroy();
-		end);
-
-		self._trove:Add(NumberValue);
-		return Tween;
-	else
-		error("Bezier:CreateVector3Tween() requires a matching property table with Vector3 or nil property names for the object as the second argument!");
+		if (PropertyType == "number" or PropertyType == "Vector2" or PropertyType == "Vector3") then
+			object[PropertName] = Position;
+		elseif (PropertyType == "CFrame") then
+			local Derivative = relativeToLength and self:CalculateDerivativeRelativeToLength(t) or self:CalculateDerivativeAt(t);
+			object[PropertName] = CFrame.lookAt(Position, Position + Derivative);
+		else
+			warn(`Attempt to apply a BezierTween to a property of type {typeof(object[PropertName])}!`);
+		end;
 	end;
 end
 
@@ -526,52 +493,37 @@ end
 	Tweens a given object in the path made by the Bezier (cframe version)
 	works for any object that has the properties given by the property table
 ]=]
-function BezierTween:CreateCFrameTween(object, propertyTable, bezierTweenInfo, relativeToLength)
-	if (#self.Points <= 1) then
-		error("Bezier:CreateVector3Tween() only works if there are at least 2 BezierPoints in the Bezier!");
+function BezierTween:CreateTween(object, propertyTable, tweenInfo, relativeToLength)
+	SmartAssert(#self.Points > 1, "Bezier:CreateTween() only works if there are at least 2 BezierPoints in the Bezier!");
+
+	-- Check if the given properties exist inside the given object
+	for _, PropertyName in propertyTable do
+		SmartAssert(ValidPropertyName(object, PropertyName), "Bezier:CreateTween() Cannot find the given properties inside the given object!");
 	end;
 
-	if (typeof(object) ~= "Instance" and typeof(object) ~= "table") then
-		error("Bezier:CreateCFrameTween() requires an Instance or a table as the first argument!");
-	end;
+	tweenInfo = tweenInfo or TweenInfo.new(
+		DEFAULT_TWEEN_TIME,
+		DEFAULT_TWEEN_EASING_STYLE,
+		DEFAULT_TWEEN_EASING_DIRECTION,
+		DEFAULT_TWEEN_REPEAT_COUNT,
+		DEFAULT_TWEEN_REVERSES,
+		DEFAULT_TWEEN_DELAY
+	);
 
-	if (not (typeof(bezierTweenInfo) == "TweenInfo")) then
-		error("Bezier:CreateCFrameTween() requires a TweenInfo object as the third argument!");
-	end;
+	local NumberValue = Instance.new("NumberValue");
+	local Tween = TweenService:Create(NumberValue, tweenInfo, {Value = 1});
 
-	local Success, FoundProperties = IsValidProperty(object, "CFrame", propertyTable);
+	NumberValue:GetPropertyChangedSignal("Value"):Connect(function()
+		self:_applyTween(object, propertyTable, NumberValue.Value, relativeToLength);
+	end);
 
-	if (Success and FoundProperties) then
-		local NumberValue = Instance.new("NumberValue");
-		local Tween = TweenService:Create(NumberValue, bezierTweenInfo, {Value = 1});
+	Tween.Destroying:Once(function()
+		self._trove:Remove(NumberValue);
+		NumberValue:Destroy();
+	end);
 
-		Tween.Changed:Connect(function(prop)
-			if (prop == "PlaybackState") then
-				local PlaybackState = Tween.PlaybackState;
-
-				if (PlaybackState == Enum.PlaybackState.Playing) then
-					self._trove:Add(NumberValue.Changed:Connect(function(t)
-						for _, PropertyName in propertyTable do
-							local Position = relativeToLength and self:CalculatePositionRelativeToLength(t) or self:CalculatePositionAt(t);
-							local Derivative = relativeToLength and self:CalculateDerivativeRelativeToLength(t) or self:CalculateDerivativeAt(t);
-							object[PropertyName] = CFrame.new(Position, Position + Derivative);
-						end;
-					end));
-				else
-					self._trove:Remove(NumberValue);
-				end;
-			end;
-		end);
-
-		Tween.Completed:Once(function()
-			self:Destroy();
-		end);
-
-		self._trove:Add(NumberValue);
-		return Tween;
-	else
-		error("Bezier:CreateCFrameTween() requires a matching property table with CFrame or nil property names for the object as the second argument!");
-	end;
+	self._trove:Add(NumberValue);
+	return Tween;
 end
 
 --[=[
@@ -599,8 +551,8 @@ setmetatable(BezierTween, {
 	end,
 	__newindex = function(_, key, _)
 		error(`Attempt to set Bezier:{tostring(key)} (not a valid member)`, 2);
-	end,
-})
+	end
+});
 
 return table.freeze({
 	new = BezierTween.new,
@@ -609,12 +561,10 @@ return table.freeze({
 	GetAllPoints = BezierTween.GetAllPoints,
 	GetPoint = BezierTween.GetPoint,
 	RemoveBezierPoint = BezierTween.RemoveBezierPoint,
-	UpdateLength = BezierTween.UpdateLength,
 	CalculatePositionAt = BezierTween.CalculatePositionAt,
 	CalculatePositionRelativeToLength = BezierTween.CalculatePositionRelativeToLength,
 	CalculateDerivativeAt = BezierTween.CalculateDerivativeAt,
 	CalculateDerivativeRelativeToLength = BezierTween.CalculateDerivativeRelativeToLength,
-	CreateVector3Tween = BezierTween.CreateVector3Tween,
-	CreateCFrameTween = BezierTween.CreateCFrameTween,
+	CreateTween = BezierTween.CreateTween,
 	Destroy = BezierTween.Destroy,
-})
+});

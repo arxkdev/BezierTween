@@ -15,7 +15,7 @@ local Stop = false;
 
 -- Tween
 local GlowPartTweenInfo = TweenInfo.new(7, Enum.EasingStyle.Sine, Enum.EasingDirection.Out, 0, false, 0);
-local Tween2 = NewBezier:CreateCFrameTween(GlowPart, {"CFrame"}, GlowPartTweenInfo);
+local Tween2 = NewBezier:CreateTween(GlowPart, {"CFrame"}, GlowPartTweenInfo);
 
 Tween2:Play();
 task.spawn(function()
@@ -25,6 +25,7 @@ task.spawn(function()
 	Tween2:Play();
 	Tween2.Completed:Once(function()
 		Stop = true;
+		Tween2:Destroy();
 	end);
 end);
 
