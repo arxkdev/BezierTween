@@ -2,7 +2,7 @@
 local TweenService = game:GetService("TweenService");
 
 -- Imports
-local Trove = require(script.Packages.Trove);
+local Trove = require(script.Parent.Trove);
 
 -- Types
 export type BezierPoint = {
