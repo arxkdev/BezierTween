@@ -51,7 +51,7 @@ export type BezierTweenArguments = {
 	@field _applyTween (self: BezierTween, object: {any}, propertyTable: {any}, t: number, relativeToLength: boolean?) -> ()
 	@field CreateTween (self: BezierTween, object: Instance | {[any]: any}, propertyTable: {any}, tweenInfo: TweenInfo, relativeToLength: boolean?) -> Tween
 	@field Destroy (self: BezierTween) -> ()
-	@field new ({Vector3 | BasePart}) -> BezierTween
+	@field new (...Vector3 | BasePart) -> BezierTween
 ]=]
 type Object = {
 	__index: Object,
@@ -68,7 +68,7 @@ type Object = {
 	_applyTween: (self: BezierTween, object: {any}, propertyTable: {any}, t: number, relativeToLength: boolean?) -> (),
 	CreateTween: (self: BezierTween, object: Instance | {[any]: any}, propertyTable: {any}, tweenInfo: TweenInfo, RelativeToLength: boolean?) -> Tween,
 	Destroy: (self: BezierTween) -> (),
-	new: ({Vector3 | BasePart}) -> BezierTween,
+	new: (...Vector3 | BasePart) -> BezierTween,
 }
 
 --[=[
